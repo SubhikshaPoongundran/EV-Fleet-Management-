@@ -1,0 +1,10 @@
+Flask
+Flask-Cors
+requests
+Flask-SocketIO
+mysql-connector-python
+SQLAlchemy
+pandas
+numpy
+scikit-learn
+geopy
