@@ -1,115 +1,107 @@
-const http = require('http');
+const mqtt = require('mqtt');
 
-const SERVER_HOST = '127.0.0.1'; 
-const SERVER_PORT = 8080;
+// --- CONFIGURATION ---
+// Connects to the Internal Broker we built in server.js
+const BROKER_URL = 'mqtt://127.0.0.1:1884'; 
+const UPDATE_INTERVAL = 2000; // Update every 2 seconds
 
-// Fleet State
-// cars now have 'job' (the route) and 'jobIndex' (progress along route)
+// --- VIRTUAL FLEET ---
+// These mimic 4 real cars driving around Chennai
 const fleet = [
-    { id: 'TN-01-AB-1234', lat: 13.0827, lng: 80.2707, status: 'idle', battery: 85, job: null, jobIndex: 0 },
-    { id: 'TN-09-XY-5678', lat: 13.0405, lng: 80.2337, status: 'idle', battery: 62, job: null, jobIndex: 0 },
-    { id: 'TN-10-ZZ-9988', lat: 13.0102, lng: 80.2156, status: 'idle', battery: 45, job: null, jobIndex: 0 },
-    { id: 'TN-22-MM-1122', lat: 12.9716, lng: 80.2430, status: 'idle', battery: 100, job: null, jobIndex: 0 }
+    { id: 'TN-01-AB-1234', lat: 13.0827, lng: 80.2707, active: false, dest: null, step: 0 },
+    { id: 'TN-09-XY-5678', lat: 13.0405, lng: 80.2337, active: false, dest: null, step: 0 },
+    { id: 'TN-10-ZZ-9988', lat: 13.0102, lng: 80.2156, active: false, dest: null, step: 0 },
+    { id: 'TN-22-MM-1122', lat: 12.9716, lng: 80.2430, active: false, dest: null, step: 0 }
 ];
 
-// Helper: Calculate distance between two points
-function getDistance(lat1, lon1, lat2, lon2) {
-    return Math.sqrt(Math.pow(lat2 - lat1, 2) + Math.pow(lon2 - lon1, 2));
-}
+// --- CONNECT TO BROKER ---
+const client = mqtt.connect(BROKER_URL);
 
-// 1. POLL FOR JOBS
-function checkServerForJobs() {
+client.on('connect', () => {
+    console.log(`✅ Simulator Connected to Broker at ${BROKER_URL}`);
+    console.log(`🚗 Simulating ${fleet.length} vehicles...`);
+    
+    // Subscribe to dispatch instructions for ALL simulated cars
     fleet.forEach(car => {
-        if (car.status === 'idle') {
-            http.get(`http://${SERVER_HOST}:${SERVER_PORT}/api/simulation/task/${car.id}`, (res) => {
-                let data = '';
-                res.on('data', chunk => data += chunk);
-                res.on('end', () => {
-                    try {
-                        const response = JSON.parse(data);
-                        if (response.hasJob) {
-                            console.log(`\n🚨 [${car.id}] RECEIVED NEW MISSION! Starting drive...`);
-                            car.job = response.route; // Array of [lat, lng]
-                            car.jobIndex = 0;
-                            car.status = 'active';
-                        }
-                    } catch (e) {}
-                });
-            }).on('error', () => {});
-        }
+        client.subscribe(`fleet/v1/dispatch/${car.id}`);
     });
-}
+});
 
-// 2. SIMULATION LOOP
-function updateFleet() {
+client.on('error', (err) => {
+    console.error('❌ Simulation Connection Error:', err.message);
+});
+
+// --- HANDLE JOB ASSIGNMENTS ---
+client.on('message', (topic, message) => {
+    const payload = JSON.parse(message.toString());
+    const carId = topic.split('/').pop();
+    
+    if (payload.type === 'JOB_ASSIGNMENT') {
+        console.log(`[${carId}] 📩 Received Job: ${payload.tripId}`);
+        startTrip(carId, payload.route);
+    }
+});
+
+// --- SIMULATION LOOP ---
+setInterval(() => {
     fleet.forEach(car => {
-        
-        if (car.status === 'active' && car.job) {
-            // --- DRIVING LOGIC ---
-            const target = car.job[car.jobIndex]; // Target [lat, lng]
-            
-            // Move towards target
-            // We use a simple interpolation (move 10% of the way there per tick)
-            // In a real game engine you'd use speed * time
-            const step = 0.2; // Speed factor
-            
-            car.lat += (target[0] - car.lat) * step;
-            car.lng += (target[1] - car.lng) * step;
-            
-            // Check if we reached the waypoint
-            const dist = getDistance(car.lat, car.lng, target[0], target[1]);
-            if (dist < 0.0001) {
-                car.jobIndex++; // Next waypoint
-            }
-
-            // Check if Trip Complete
-            if (car.jobIndex >= car.job.length) {
-                console.log(`\n✅ [${car.id}] MISSION COMPLETE. Returning to Idle.`);
-                car.status = 'idle';
-                car.job = null;
-                car.jobIndex = 0;
-            }
-            
-            // Battery Drain
-            car.battery = Math.max(0, car.battery - 0.05);
-
-        } else if (car.status === 'idle') {
-            // --- IDLE JITTER ---
-            // Just vibrate slightly to show connection is alive
-            car.lat += (Math.random() - 0.5) * 0.00001;
-            car.lng += (Math.random() - 0.5) * 0.00001;
-            // Charge battery slowly while idle
-            car.battery = Math.min(100, car.battery + 0.1);
+        // Logic 1: If Active, Drive along the route
+        if (car.active && car.route && car.route.length > 0) {
+            moveCarAlongRoute(car);
+        } else {
+            // Logic 2: If Idle, add tiny jitter (GPS noise) so they look "alive"
+            car.lat += (Math.random() - 0.5) * 0.0001;
+            car.lng += (Math.random() - 0.5) * 0.0001;
         }
 
-        // --- REPORT TO SERVER ---
-        const postData = JSON.stringify({
+        // Logic 3: Battery Drain Simulation
+        let battery = 85; // Default
+        if (car.active) battery -= 1; // Drain when moving
+
+        // --- PUBLISH TELEMETRY ---
+        const payload = JSON.stringify({
             carId: car.id,
             lat: car.lat,
             lng: car.lng,
-            status: car.status,
-            battery: car.battery.toFixed(1),
-            range: Math.floor((car.battery / 100) * 400),
-            type: 'EV Sedan'
+            status: car.active ? 'active' : 'idle',
+            battery: battery,
+            type: 'Simulated EV',
+            range: 300 + Math.floor(Math.random() * 20)
         });
 
-        const req = http.request({
-            hostname: SERVER_HOST,
-            port: SERVER_PORT,
-            path: '/api/update-location',
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) }
-        });
-        
-        req.on('error', () => {}); 
-        req.write(postData);
-        req.end();
+        client.publish(`fleet/v1/update/${car.id}`, payload);
     });
+}, UPDATE_INTERVAL);
+
+
+// --- HELPER FUNCTIONS ---
+
+function startTrip(carId, route) {
+    const car = fleet.find(c => c.id === carId);
+    if (car && route && route.length > 0) {
+        car.active = true;
+        car.route = route;
+        car.step = 0;
+        console.log(`[${carId}] 🚀 Starting trip with ${route.length} waypoints.`);
+    }
 }
 
-// Loops
-setInterval(updateFleet, 500); // Drive/Update every 500ms
-setInterval(checkServerForJobs, 2000); // Check for assignments every 2s
+function moveCarAlongRoute(car) {
+    // Simple interpolation: Move to next waypoint
+    if (car.step < car.route.length) {
+        const target = car.route[car.step];
+        
+        // Move 20% of the way to the target per tick (smooth animation)
+        car.lat += (target.lat - car.lat) * 0.2;
+        car.lng += (target.lng - car.lng) * 0.2;
 
-console.log("🤖 Autonomous Fleet Simulator Running...");
-console.log("   - Cars are IDLE. Waiting for assignments from Dashboard...");
+        // Check if close enough to target to switch to next waypoint
+        if (Math.abs(target.lat - car.lat) < 0.0005 && Math.abs(target.lng - car.lng) < 0.0005) {
+            car.step++;
+        }
+    } else {
+        // Trip Done
+        car.active = false;
+        console.log(`[${car.id}] 🏁 Trip Completed.`);
+    }
+}

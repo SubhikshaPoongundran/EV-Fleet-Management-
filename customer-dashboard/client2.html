@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>EV-FLEET | CLIENT TERMINAL</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = { 
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        mono: ['JetBrains Mono', 'monospace'],
+                        sans: ['Rajdhani', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Rajdhani:wght@500;600;700&display=swap');
+        
+        body { background-color: #09090b; color: #e4e4e7; overflow: hidden; margin: 0; padding: 0; }
+        
+        /* MAP LAYER */
+        #map { 
+            height: 100vh; width: 100%; position: absolute; top: 0; left: 0; z-index: 1; 
+            filter: grayscale(100%) invert(100%) contrast(90%);
+            cursor: grab; pointer-events: auto !important; 
+        }
+        #map:active { cursor: grabbing; }
+
+        /* UI OVERLAY */
+        .ui-overlay {
+            position: absolute; inset: 0; z-index: 50; 
+            pointer-events: none; /* Allows click-through to map */
+            display: flex; flex-direction: column; padding: 1.5rem;
+        }
+        .interactive { pointer-events: auto !important; }
+
+        /* VISUALS */
+        .scanline {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100px; z-index: 10; pointer-events: none; 
+            background: linear-gradient(0deg, rgba(6, 182, 212, 0) 0%, rgba(6, 182, 212, 0.05) 50%, rgba(6, 182, 212, 0) 100%);
+            animation: scan 8s linear infinite;
+        }
+        @keyframes scan { from { top: -100px; } to { top: 100vh; } }
+
+        .tech-border {
+            position: relative; background: rgba(24, 24, 27, 0.95);
+            border: 1px solid rgba(6, 182, 212, 0.2); backdrop-filter: blur(12px);
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        .tech-border::before {
+            content: ''; position: absolute; top: -1px; left: -1px; width: 12px; height: 12px;
+            border-top: 2px solid #06b6d4; border-left: 2px solid #06b6d4;
+        }
+        .tech-border::after {
+            content: ''; position: absolute; bottom: -1px; right: -1px; width: 12px; height: 12px;
+            border-bottom: 2px solid #06b6d4; border-right: 2px solid #06b6d4;
+        }
+        .glow-text { text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #09090b; }
+        ::-webkit-scrollbar-thumb { background: #06b6d4; border-radius: 3px; }
+    </style>
+</head>
+
+<body class="font-sans">
+
+    <div id="map"></div>
+    <div class="scanline"></div>
+
+    <div class="ui-overlay">
+        
+        <header class="flex justify-between items-start interactive">
+            <div class="tech-border p-5 flex items-center gap-5 pr-10">
+                <div class="w-12 h-12 bg-cyan-500/10 border border-cyan-500 flex items-center justify-center relative overflow-hidden">
+                    <div class="absolute inset-0 bg-cyan-500/20 animate-ping"></div>
+                    <div class="w-3 h-3 bg-cyan-400 relative z-10"></div>
+                </div>
+                <div>
+                    <h1 class="text-3xl font-bold tracking-tighter glow-text leading-none">EV-<span class="text-cyan-500">CLIENT</span></h1>
+                    <p class="text-[10px] font-mono text-cyan-500/60 uppercase tracking-[0.4em] mt-1">Neural Link Stable</p>
+                </div>
+            </div>
+
+            <div class="flex flex-col gap-2 items-end">
+                <div id="mqttStatus" class="tech-border px-4 py-2 font-mono text-xs text-red-400 flex items-center gap-2 transition-colors">
+                    <span class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span> MQTT: OFFLINE
+                </div>
+                <button onclick="toggleTheme()" class="tech-border px-4 py-2 font-mono text-[10px] hover:bg-cyan-500/10 transition-colors uppercase text-cyan-500 border-cyan-500/30">
+                    Toggle Spectrum
+                </button>
+            </div>
+        </header>
+
+        <div class="mt-auto mb-6 flex gap-6 items-end interactive">
+            <section class="tech-border w-80 p-5 space-y-4">
+                <div class="border-b border-cyan-500/30 pb-2 flex justify-between items-end">
+                    <span class="text-lg font-mono font-bold text-cyan-400 tracking-widest uppercase glow-text">Mission Params</span>
+                    <span class="text-[10px] font-mono text-zinc-500">V2.7.1</span>
+                </div>
+
+                <div class="space-y-4">
+                    <div class="relative">
+                        <label class="text-[9px] font-mono text-cyan-500 uppercase font-bold absolute -top-2 left-2 bg-zinc-900 px-1">Client Identity</label>
+                        <input id="nameInput" type="text" placeholder="ENTER CALLSIGN..." class="w-full bg-black/60 border border-zinc-800 p-3 font-mono text-xs text-zinc-300 outline-none focus:border-cyan-500 transition-colors uppercase tracking-wider placeholder-zinc-600"/>
+                    </div>
+
+                    <div class="relative group">
+                        <label class="text-[9px] font-mono text-cyan-500 uppercase font-bold absolute -top-2 left-2 bg-zinc-900 px-1">Asset Class</label>
+                        <div class="w-full bg-cyan-950/20 border border-cyan-500/30 p-3 font-mono text-sm text-cyan-100 flex items-center justify-between shadow-[inset_0_0_10px_rgba(6,182,212,0.1)]">
+                            <div class="flex items-center gap-3">
+                                <div class="flex items-center gap-2">
+                                    <div class="w-2 h-2 bg-cyan-500 rounded-full"></div> 
+                                    <span>EV CAR</span>
+                                </div>
+                                <div class="flex items-center gap-1.5 bg-cyan-500/10 px-2 py-1 rounded border border-cyan-500/20" title="Capacity: 4">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" class="text-cyan-400"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                                    <span class="text-xs font-bold text-cyan-400">4</span>
+                                </div>
+                            </div>
+                            <span class="text-[10px] bg-cyan-500/20 text-cyan-400 px-2 py-0.5 rounded border border-cyan-500/30">LOCKED</span>
+                        </div>
+                    </div>
+
+                    <div class="relative">
+                        <label class="text-[9px] font-mono text-cyan-500 uppercase font-bold absolute -top-2 left-2 bg-zinc-900 px-1">Origin</label>
+                        <input id="pickupInput" readonly class="w-full bg-black/60 border border-zinc-800 p-3 font-mono text-xs text-zinc-400 outline-none focus:border-cyan-500 transition-colors uppercase tracking-wider" value="INITIALIZING GPS..."/>
+                    </div>
+
+                    <div class="relative">
+                        <label class="text-[9px] font-mono text-purple-500 uppercase font-bold absolute -top-2 left-2 bg-zinc-900 px-1">Destination</label>
+                        <input id="dropInput" oninput="debouncedSuggest()" placeholder="SEARCH COORDINATES..." class="w-full bg-black/80 border border-purple-500/30 p-3 font-mono text-xs text-white outline-none focus:border-purple-500 transition-colors uppercase tracking-wider"/>
+                        <div id="suggestions" class="absolute left-0 bottom-full mb-2 w-full bg-zinc-950 border border-zinc-700 hidden max-h-56 overflow-y-auto z-[2000] shadow-2xl interactive"></div>
+                    </div>
+                </div>
+
+                <div id="routeInfo" class="space-y-2 hidden border-t border-dashed border-zinc-800 pt-2">
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="bg-cyan-500/5 border border-cyan-500/20 p-2 relative overflow-hidden">
+                            <p class="text-[9px] font-mono text-cyan-500 uppercase tracking-wider">Vector</p>
+                            <p class="text-xl font-bold font-mono text-cyan-100"><span id="distanceText">0</span><span class="text-xs text-zinc-500 ml-1">KM</span></p>
+                        </div>
+                        <div class="bg-purple-500/5 border border-purple-500/20 p-2 relative overflow-hidden">
+                            <p class="text-[9px] font-mono text-purple-500 uppercase tracking-wider">Interval</p>
+                            <p class="text-xl font-bold font-mono text-purple-100"><span id="durationText">0</span><span class="text-xs text-zinc-500 ml-1">MIN</span></p>
+                        </div>
+                    </div>
+                    <div class="bg-gradient-to-r from-emerald-900/20 to-transparent border border-emerald-500/30 p-2 flex justify-between items-center">
+                        <div class="relative z-10">
+                            <p class="text-[9px] font-mono text-emerald-400 uppercase tracking-wider mb-0.5">Estimated Fare</p>
+                            <p class="text-[9px] text-zinc-500 font-mono">BASE ₹60 + ₹20/KM</p>
+                        </div>
+                        <p class="relative z-10 text-2xl font-bold font-mono text-emerald-400">₹<span id="fareAmount">0</span></p>
+                    </div>
+                </div>
+
+                <button id="initBtn" onclick="publishMission()" class="w-full bg-cyan-600 hover:bg-cyan-500 text-black font-bold py-3 uppercase tracking-[0.2em] text-sm transition-all shadow-[0_0_25px_rgba(6,182,212,0.4)] clip-path-slant hover:scale-[1.02] active:scale-[0.98]">
+                    Initialize Sortie
+                </button>
+            </section>
+        </div>
+
+    </div>
+
+    <div class="fixed bottom-6 right-6 z-[2000] flex flex-col gap-3 interactive">
+        <button onclick="map.zoomIn()" class="tech-border w-12 h-12 flex items-center justify-center text-cyan-400 hover:bg-cyan-500/20 hover:text-white transition-all active:scale-95 group cursor-pointer shadow-lg">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        </button>
+        <button onclick="map.zoomOut()" class="tech-border w-12 h-12 flex items-center justify-center text-cyan-400 hover:bg-cyan-500/20 hover:text-white transition-all active:scale-95 group cursor-pointer shadow-lg">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        </button>
+    </div>
+
+<script>
+/* 1. MAP INIT */
+let map, pickupMarker, dropMarker, routeLine;
+let pickupLat = 11.0168, pickupLng = 76.9558;
+let dropLat = null, dropLng = null;
+
+function initMap() {
+    map = L.map("map", { zoomControl: false, attributionControl: false, dragging: true }).setView([pickupLat, pickupLng], 13);
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { subdomains: 'abcd', maxZoom: 19 }).addTo(map);
+}
+
+function toggleTheme() {
+    const isDark = document.documentElement.classList.toggle("dark");
+    const tileUrl = isDark ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png" : "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png";
+    document.getElementById("map").style.filter = isDark ? "grayscale(100%) invert(100%) contrast(90%)" : "none";
+    map.eachLayer(l => l.remove());
+    L.tileLayer(tileUrl, { subdomains: 'abcd', maxZoom: 19 }).addTo(map);
+    if(pickupMarker) pickupMarker.addTo(map);
+    if(dropMarker) dropMarker.addTo(map);
+    if(routeLine) routeLine.addTo(map);
+}
+
+/* 2. MQTT LOGIC (CONNECTED TO SERVER) */
+let client;
+const MQTT_BROKER = "localhost"; // Local Server
+const MQTT_PORT = 8083;          // Server WebSocket Port
+const MQTT_TOPIC = "ev/fleet/request";
+
+function connectMQTT() {
+    const clientId = "client-" + Math.random().toString(16).substr(2, 8);
+    // Connect to WebSocket Port 8083
+    client = new Paho.MQTT.Client(MQTT_BROKER, Number(MQTT_PORT), clientId);
+    client.onConnectionLost = (res) => { console.log("MQTT LOST", res); updateStatus(false); setTimeout(connectMQTT, 5000); };
+    client.connect({ onSuccess: () => { console.log("MQTT CONNECTED"); updateStatus(true); }, onFailure: (e) => { console.log("MQTT FAIL", e); updateStatus(false); } });
+}
+
+function updateStatus(isOnline) {
+    const el = document.getElementById("mqttStatus");
+    if(isOnline) {
+        el.innerHTML = `<span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span> MQTT: ONLINE`;
+        el.className = "tech-border px-4 py-2 font-mono text-xs text-green-400 flex items-center gap-2 transition-colors";
+    } else {
+        el.innerHTML = `<span class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span> MQTT: OFFLINE`;
+        el.className = "tech-border px-4 py-2 font-mono text-xs text-red-400 flex items-center gap-2 transition-colors";
+    }
+}
+
+function publishMission() {
+    if(!dropLat || !dropLng) { alert("SET DESTINATION FIRST"); return; }
+    const payload = {
+        type: "MISSION_REQUEST",
+        timestamp: new Date().toISOString(),
+        client: { name: document.getElementById("nameInput").value || "UNKNOWN", id: "ID-" + Math.floor(Math.random()*1000) },
+        asset: { type: "EV_CAR", capacity: 4 },
+        route: { origin: {lat:pickupLat, lng:pickupLng}, destination: {lat:dropLat, lng:dropLng}, distance: document.getElementById("distanceText").innerText, fare: document.getElementById("fareAmount").innerText },
+        status: "PENDING"
+    };
+    const msg = new Paho.MQTT.Message(JSON.stringify(payload));
+    msg.destinationName = MQTT_TOPIC;
+    try {
+        client.send(msg);
+        const btn = document.getElementById("initBtn");
+        btn.innerText = "TRANSMISSION SENT";
+        btn.className = "w-full bg-green-600 text-white font-bold py-3 uppercase tracking-[0.2em] text-sm clip-path-slant";
+        setTimeout(() => { btn.innerText = "INITIALIZE SORTIE"; btn.className = "w-full bg-cyan-600 hover:bg-cyan-500 text-black font-bold py-3 uppercase tracking-[0.2em] text-sm transition-all shadow-[0_0_25px_rgba(6,182,212,0.4)] clip-path-slant"; }, 3000);
+    } catch(e) { alert("TRANSMISSION ERROR"); }
+}
+
+/* 3. UTILS & GEO */
+navigator.geolocation.getCurrentPosition(
+    pos => { pickupLat=pos.coords.latitude; pickupLng=pos.coords.longitude; updateOriginUI(pickupLat, pickupLng); }, 
+    err => updateOriginUI(pickupLat, pickupLng)
+);
+
+// UPDATED: Reverse Geocoding with English Enforcement
+async function updateOriginUI(lat, lng) {
+    const pickupInput = document.getElementById("pickupInput");
+    pickupInput.value = `SCANNING: ${lat.toFixed(4)}, ${lng.toFixed(4)}...`;
+    
+    map.setView([lat, lng], 14);
+    const icon = L.divIcon({ className: 'custom-div-icon', html: `<div style="background-color:#06b6d4; width:14px; height:14px; border:2px solid #fff; border-radius:50%; box-shadow: 0 0 15px #06b6d4;"></div>`, iconSize: [14, 14], iconAnchor: [7, 7] });
+    
+    if(pickupMarker) map.removeLayer(pickupMarker);
+    pickupMarker = L.marker([lat, lng], {icon: icon}).addTo(map);
+
+    try {
+        // Added accept-language=en
+        const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=en`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (data && data.display_name) {
+            const shortAddress = data.display_name.split(',').slice(0, 3).join(',').toUpperCase();
+            pickupInput.value = `📍 ${shortAddress}`;
+        } else {
+            pickupInput.value = `SEC-LOC: ${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+        }
+    } catch (e) {
+        console.error("Geo-Decode Failed", e);
+        pickupInput.value = `SEC-LOC: ${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    }
+}
+
+let debounceTimer;
+const suggestionsBox = document.getElementById("suggestions");
+const dropInput = document.getElementById("dropInput");
+function debouncedSuggest() { clearTimeout(debounceTimer); debounceTimer = setTimeout(fetchSuggestions, 400); }
+
+async function fetchSuggestions() {
+    const q = dropInput.value.trim();
+    if(q.length < 3) { suggestionsBox.classList.add("hidden"); return; }
+    try {
+        // Added accept-language=en
+        let res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=5&countrycodes=in&accept-language=en&q=${encodeURIComponent(q)}`);
+        let data = await res.json();
+        suggestionsBox.innerHTML = "";
+        if(data.length === 0) { suggestionsBox.classList.add("hidden"); return; }
+        data.forEach(p => {
+            const div = document.createElement("div");
+            div.className = "px-4 py-3 cursor-pointer border-b border-zinc-800 hover:bg-cyan-500/10 text-[10px] font-mono text-zinc-300 uppercase transition-colors flex items-center justify-between group interactive";
+            div.innerHTML = `<span>${p.display_name.split(',')[0]}</span> <span class="opacity-0 group-hover:opacity-100 text-cyan-500">>>></span>`;
+            div.onclick = () => selectPlace(p);
+            suggestionsBox.appendChild(div);
+        });
+        suggestionsBox.classList.remove("hidden");
+    } catch(e) {}
+}
+
+function selectPlace(p) {
+    dropInput.value = p.display_name.split(',')[0];
+    suggestionsBox.classList.add("hidden");
+    dropLat = parseFloat(p.lat); dropLng = parseFloat(p.lon);
+    const icon = L.divIcon({ className: 'custom-div-icon', html: `<div style="background-color:#a855f7; width:14px; height:14px; border:2px solid #fff; border-radius:50%; box-shadow: 0 0 15px #a855f7;"></div>`, iconSize: [14, 14], iconAnchor: [7, 7] });
+    if(dropMarker) map.removeLayer(dropMarker);
+    dropMarker = L.marker([dropLat, dropLng], {icon: icon}).addTo(map);
+    drawRoute();
+}
+
+async function drawRoute() {
+    if(!dropLat || !dropLng) return;
+    if(routeLine) map.removeLayer(routeLine);
+    const res = await fetch(`https://router.project-osrm.org/route/v1/driving/${pickupLng},${pickupLat};${dropLng},${dropLat}?overview=full&geometries=geojson`);
+    const data = await res.json();
+    if(!data.routes || data.routes.length === 0) return;
+    const route = data.routes[0];
+    routeLine = L.geoJSON(route.geometry, { style: { color: "#06b6d4", weight: 4, dashArray: '10, 10', opacity: 0.8 } }).addTo(map);
+    map.fitBounds(routeLine.getBounds(), { padding: [100, 100] });
+    const dist = (route.distance/1000).toFixed(1);
+    document.getElementById("distanceText").innerText = dist;
+    document.getElementById("durationText").innerText = Math.round(route.duration/60);
+    document.getElementById("fareAmount").innerText = Math.round(60 + (dist * 20));
+    document.getElementById("routeInfo").classList.remove("hidden");
+}
+
+window.onload = () => { initMap(); connectMQTT(); };
+</script>
+</body>
+</html>
