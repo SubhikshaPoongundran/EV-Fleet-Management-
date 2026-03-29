@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EV Driver Dashboard - Fleet Network</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Map & Icons -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        #map { 
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100vh; 
+            width: 100vw; 
+            z-index: 0; 
+        }
+        
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.92);
+            backdrop-filter: blur(12px);
+            border-radius: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .battery-gradient { transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
+
+        .alert-danger {
+            background: rgba(220, 38, 38, 0.98) !important;
+            color: white !important;
+            border: 4px solid #7f1d1d !important;
+            animation: shake 0.4s infinite;
+        }
+        
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-4px); }
+            75% { transform: translateX(4px); }
+        }
+        
+        /* NEW: Route Path Connection Animation */
+        .route-path {
+            stroke-dasharray: 10, 10;
+            animation: dash 20s linear infinite;
+            stroke: #06b6d4;
+        }
+        @keyframes dash {
+            to { stroke-dashoffset: -1000; }
+        }
+
+        .custom-station-marker { transition: transform 0.3s ease; }
+        .custom-station-marker:hover { transform: scale(1.2); }
+        
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: rgba(0,0,0,0.1); }
+        ::-webkit-scrollbar-thumb { background: #06b6d4; border-radius: 4px; }
+    </style>
+</head>
+<body class="bg-slate-900 overflow-hidden font-sans">
+
+    <!-- INITIAL CONNECTION SCREEN -->
+    <div id="connection-screen" class="absolute inset-0 z-[5000] flex items-center justify-center bg-slate-900 backdrop-blur-xl">
+        <div class="glass-panel p-8 w-full max-w-md shadow-2xl border-cyan-500/30">
+            <div class="text-center mb-8">
+                <i class="fas fa-satellite-dish text-4xl text-cyan-500 mb-4 animate-pulse"></i>
+                <h2 class="text-2xl font-black text-slate-800 tracking-widest uppercase">Fleet Uplink</h2>
+                <p class="text-xs text-slate-500 font-bold mt-2">ENTER SYSTEM PARAMETERS</p>
+            </div>
+            
+            <div class="space-y-4">
+                <div>
+                    <label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Driver Callsign (Name)</label>
+                    <input type="text" id="driver-name-input" class="w-full mt-1 p-4 bg-slate-100 border border-slate-300 rounded-xl text-sm font-bold text-slate-800 focus:outline-none focus:border-cyan-500" placeholder="e.g., John Doe">
+                </div>
+                <div>
+                    <label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Server IP / Hostname</label>
+                    <input type="text" id="server-ip-input" value="100.92.235.83" class="w-full mt-1 p-4 bg-slate-100 border border-slate-300 rounded-xl text-sm font-bold text-slate-800 focus:outline-none focus:border-cyan-500" placeholder="e.g., 100.x.x.x">
+                </div>
+                <button onclick="startAppWithIP()" class="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-black text-sm py-4 rounded-xl shadow-lg transition-transform active:scale-95 uppercase tracking-widest">Connect to Fleet</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Background Map -->
+    <div id="map"></div>
+
+    <!-- Top Overlay: Driver & Battery Info -->
+    <div class="absolute top-6 left-6 right-6 z-[1000] flex flex-col md:flex-row gap-4 pointer-events-none">
+        
+        <!-- Driver Profile & MQTT Status -->
+        <div class="glass-panel p-5 pointer-events-auto w-full max-w-sm border-l-4 border-emerald-500">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-4">
+                    <div class="relative">
+                        <div class="w-14 h-14 rounded-full bg-slate-200 flex items-center justify-center overflow-hidden border-2 border-white shadow-lg">
+                            <i class="fas fa-user text-slate-400 text-2xl"></i>
+                        </div>
+                        <div id="mqtt-status-dot" class="absolute bottom-0 right-0 w-4 h-4 rounded-full bg-red-500 border-2 border-white"></div>
+                    </div>
+                    <div>
+                        <h2 class="font-bold text-slate-800 text-lg" id="display-name">Unauthenticated</h2>
+                        <span class="text-xs font-medium text-slate-500 uppercase tracking-wider" id="mqtt-status-text">Connecting...</span>
+                    </div>
+                </div>
+                <button id="toggle-status-btn" onclick="toggleDriverStatus()" class="bg-slate-900 text-white px-5 py-2.5 rounded-xl text-xs font-black shadow-lg transition hover:bg-slate-800 active:scale-95">
+                    GO ONLINE
+                </button>
+            </div>
+            <div class="mt-4 pt-3 border-t border-slate-200 flex justify-between items-center">
+                <span class="text-xs font-bold text-slate-400 uppercase tracking-widest">Current Speed</span>
+                <span class="font-black text-slate-800 text-lg" id="ui-speed">0 km/h</span>
+            </div>
+        </div>
+
+        <!-- Battery Telemetry Panel -->
+        <div class="glass-panel p-5 pointer-events-auto w-full max-w-sm border-l-4 border-blue-500">
+            <div class="flex justify-between items-start mb-3">
+                <div>
+                    <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Battery Health</span>
+                    <div class="flex items-baseline space-x-2">
+                        <h3 class="text-3xl font-black text-slate-800" id="ui-soc">--%</h3>
+                        <span class="text-xs font-bold text-blue-600" id="ui-voltage">0.0V</span>
+                    </div>
+                </div>
+                <i class="fas fa-bolt text-blue-500 text-xl mt-1"></i>
+            </div>
+            
+            <div class="w-full bg-slate-200 h-3 rounded-full overflow-hidden mb-2">
+                <div id="soc-bar" class="battery-gradient h-full bg-gradient-to-r from-blue-600 to-cyan-400" style="width: 0%"></div>
+            </div>
+            <div class="flex justify-between text-[10px] font-bold text-slate-400">
+                <span>0%</span>
+                <span id="ui-status">SYSTEM READY</span>
+                <span>100%</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Locate Chargers Button -->
+    <button onclick="fetchAndDisplayStations()" class="absolute bottom-10 right-6 z-[1000] bg-cyan-600 hover:bg-cyan-500 text-white w-16 h-16 rounded-full shadow-[0_0_20px_rgba(6,182,212,0.4)] flex items-center justify-center transition-transform active:scale-95 focus:outline-none border-2 border-white">
+        <i class="fas fa-charging-station text-2xl"></i>
+    </button>
+
+    <!-- Charging Stations Panel -->
+    <div id="stations-panel" class="absolute top-24 right-6 w-80 max-h-[60vh] z-[1500] glass-panel p-0 transform translate-x-[150%] transition-transform duration-500 overflow-hidden flex flex-col shadow-2xl">
+        <div class="bg-slate-900 p-4 flex justify-between items-center">
+            <h3 class="text-cyan-500 font-black tracking-widest uppercase text-sm flex items-center gap-2">
+                <i class="fas fa-plug text-white"></i> Power Nodes
+            </h3>
+            <button onclick="closeStationsPanel()" class="text-slate-400 hover:text-white transition"><i class="fas fa-times"></i></button>
+        </div>
+        <div id="station-list" class="overflow-y-auto flex-1 p-4 space-y-3 bg-slate-50/50"></div>
+    </div>
+
+    <!-- ACTIVE MISSION HUD -->
+    <div id="active-mission-panel" class="hidden absolute bottom-10 left-1/2 -translate-x-1/2 w-[480px] z-[2000] glass-panel p-6 border-t-4 border-cyan-500 shadow-2xl">
+        <h3 class="text-cyan-600 font-black font-mono text-sm tracking-widest mb-4 flex items-center gap-2">
+            <span class="w-2 h-2 bg-cyan-500 rounded-full animate-ping"></span> MISSION IN PROGRESS
+        </h3>
+        <div class="flex justify-between items-center">
+            <div class="flex-1 mr-4">
+                <p class="text-[10px] text-slate-400 uppercase font-black">Destination</p>
+                <p class="text-sm font-bold text-slate-800 truncate" id="active-dest">--</p>
+            </div>
+            <button onclick="completeMission()" class="bg-cyan-600 hover:bg-cyan-500 text-white font-black px-6 py-3 rounded-xl shadow-lg transition transform active:scale-95 uppercase tracking-widest text-xs whitespace-nowrap">
+                FINISH TRIP
+            </button>
+        </div>
+    </div>
+
+    <!-- Alert / Request Modal -->
+    <div id="request-modal" class="absolute bottom-0 left-0 right-0 md:bottom-10 md:left-1/2 md:-translate-x-1/2 md:w-[480px] z-[2000] transform translate-y-[150%] transition-transform duration-500 ease-in-out">
+        <div class="glass-panel p-0 overflow-hidden shadow-2xl border border-slate-200">
+            <div id="modal-header" class="bg-slate-900 text-white p-5 flex justify-between items-center">
+                <div class="flex items-center space-x-3">
+                    <div class="animate-pulse w-2.5 h-2.5 bg-emerald-400 rounded-full"></div>
+                    <span id="modal-title" class="font-black text-sm tracking-widest uppercase">SYSTEM ALERT</span>
+                </div>
+                <div class="bg-white/20 px-3 py-1 rounded-full text-xs font-mono font-bold" id="countdown">--s</div>
+            </div>
+
+            <div class="p-6">
+                <div class="flex items-start justify-between mb-8">
+                    <div>
+                        <div class="text-[10px] text-slate-400 uppercase font-black mb-1">Details</div>
+                        <h3 class="text-2xl font-black text-slate-800" id="req-primary-text">--</h3>
+                    </div>
+                    <div class="text-right" id="fare-container">
+                        <div class="text-[10px] text-slate-400 uppercase font-black mb-1">Impact</div>
+                        <h3 class="text-3xl font-black text-emerald-600" id="req-secondary-text">!!!</h3>
+                    </div>
+                </div>
+
+                <div class="relative pl-8 space-y-8 border-l-2 border-slate-100 ml-2 mb-8" id="info-stack">
+                    <div class="relative">
+                        <div class="absolute -left-[41px] top-1 w-5 h-5 rounded-full bg-slate-900 border-4 border-white shadow-sm"></div>
+                        <div class="text-[10px] text-slate-400 uppercase font-bold" id="label-1">Info</div>
+                        <div class="font-bold text-slate-700" id="req-pickup">--</div>
+                    </div>
+                    <div class="relative" id="dest-container">
+                        <div class="absolute -left-[41px] top-1 w-5 h-5 rounded-full bg-blue-500 border-4 border-white shadow-sm"></div>
+                        <div class="text-[10px] text-slate-400 uppercase font-bold">Action</div>
+                        <div class="font-bold text-slate-700" id="req-destination">--</div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <button onclick="dismissModal()" class="py-4 rounded-2xl border-2 border-slate-100 text-slate-500 font-black text-sm hover:bg-slate-50 transition">REJECT</button>
+                    <button onclick="acknowledgeAction()" class="py-4 rounded-2xl bg-slate-900 text-white font-black text-sm hover:bg-slate-800 shadow-xl transition transform active:scale-95">ACCEPT JOB</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class BatteryModel {
+            constructor(capacity_kwh = 60.0, initial_soc = 100.0, nominal_v = 400.0) {
+                this.capacity_kwh = capacity_kwh;
+                this.capacity_ah = (capacity_kwh * 1000) / nominal_v;
+                this.soc = initial_soc / 100.0; 
+                this.nominal_v = nominal_v;
+                this.R0 = 0.05; this.R1 = 0.01; this.C1 = 2000; this.R2 = 0.02; this.C2 = 4000;
+                this.v1 = 0.0; this.v2 = 0.0; this.terminal_v = nominal_v;
+                this.status = 'IDLE';
+            }
+            getOCV(soc) {
+                let cell_v = 3.2 + 0.8 * soc + 0.2 * Math.log(soc + 0.01) - 0.1 * Math.log(1.01 - soc);
+                return cell_v * (this.nominal_v / 3.7);
+            }
+            step(current_amps, dt_seconds) {
+                if (this.status === 'CHARGING') {
+                    // Pattern: 5% per second recovery
+                    this.soc = Math.min(1.0, this.soc + 0.05);
+                    if (this.soc >= 1.0) this.status = 'IDLE';
+                } else {
+                    // Pattern: Drain logic (simulated current drain)
+                    this.soc -= (current_amps * dt_seconds) / (this.capacity_ah * 3600.0);
+                    this.soc = Math.max(0.0, this.soc);
+                    
+                    // Trigger Auto-Charge pattern at 25%
+                    if (this.soc <= 0.25) this.status = 'CHARGING';
+                }
+
+                this.v1 = this.v1 * Math.exp(-dt_seconds / (this.R1 * this.C1)) + this.R1 * current_amps * (1 - Math.exp(-dt_seconds / (this.R1 * this.C1)));
+                this.v2 = this.v2 * Math.exp(-dt_seconds / (this.R2 * this.C2)) + this.R2 * current_amps * (1 - Math.exp(-dt_seconds / (this.R2 * this.C2)));
+                let ocv = this.getOCV(this.soc);
+                this.terminal_v = ocv - (current_amps * this.R0) - this.v1 - this.v2;
+                return { soc: this.soc * 100, voltage: this.terminal_v };
+            }
+        }
+
+        const battery = new BatteryModel();
+        let map, driverMarker, routeLine, isOnline = false;
+        let currentSpeed = 0, hardwareGPSLock = false, activeJobId = null, countdownTimer;
+        let stationMarkers = []; 
+
+        let MQTT_BROKER = ""; 
+        const API_PORT = 8080; 
+        const MQTT_PORT = 8083; 
+        const MY_VEHICLE_ID = "ev_car_01"; 
+
+        const TOPIC_ALERTS = "taxi/app/driver/requests";
+        const TOPIC_TELEMETRY = "fleet/ev/location"; 
+        const TOPIC_DISPATCH = "fleet/ev/requests"; 
+        const TOPIC_RESPONSE = "fleet/server/responses"; 
+        const TOPIC_CANCEL = "fleet/ev/cancel";
+
+        let mqttClient;
+
+        // --- NEW: Audio Notification Controller ---
+        function playAlertSound(type) {
+            try {
+                // Info Ping for Jobs, Siren for Safety Alerts
+                let audioUrl = type === 'danger' 
+                    ? 'https://assets.mixkit.co/active_storage/sfx/995/995-preview.mp3' 
+                    : 'https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3';
+                
+                const audio = new Audio(audioUrl);
+                audio.play().catch(e => console.log("Audio playback blocked. User interaction required first.", e));
+            } catch(e) {}
+        }
+
+        function startAppWithIP() {
+            MQTT_BROKER = document.getElementById('server-ip-input').value.trim();
+            const driverName = document.getElementById('driver-name-input').value.trim();
+            
+            if (!MQTT_BROKER) return alert("Please enter Server IP");
+            if (driverName) document.getElementById('display-name').innerText = driverName;
+
+            // Request permission for OS Level Browser Notifications
+            if ("Notification" in window && Notification.permission !== "granted") {
+                Notification.requestPermission();
+            }
+
+            document.getElementById('connection-screen').style.display = 'none';
+            initApp(); 
+        }
+
+        function initApp() {
+            // Dashboard starts ONLINE automatically
+            const btn = document.getElementById('toggle-status-btn');
+            isOnline = true;
+            btn.innerText = "GO OFFLINE";
+            btn.classList.remove('bg-slate-900');
+            btn.classList.add('bg-red-500');
+            
+            // FIX: Using CartoDB maps to prevent 403 Access Blocked Errors
+            map = L.map('map', { zoomControl: false, attributionControl: false }).setView([11.0168, 76.9558], 15);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png').addTo(map);
+            
+            const evIcon = L.divIcon({ className: 'custom-div-icon', html: "<div style='background-color:#3b82f6; width:20px; height:20px; border-radius:50%; border:3px solid white; box-shadow: 0 0 10px rgba(0,0,0,0.5);'></div>", iconSize: [20, 20], iconAnchor: [10, 10] });
+            driverMarker = L.marker([11.0168, 76.9558], {icon: evIcon, zIndexOffset: 1000}).addTo(map);
+
+            setTimeout(() => map.invalidateSize(), 500);
+
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition((position) => {
+                    if (!hardwareGPSLock) { 
+                        const realPos = new L.LatLng(position.coords.latitude, position.coords.longitude);
+                        map.setView(realPos, 16); driverMarker.setLatLng(realPos);
+                    }
+                });
+            }
+            connectMQTT(); 
+            startBatterySimulation();
+        }
+
+        async function fetchAndDisplayStations() {
+            if (!MQTT_BROKER) return alert("System Offline. Awaiting Server Connection.");
+            try {
+                const response = await fetch(`http://${MQTT_BROKER}:${API_PORT}/api/stations`);
+                if (!response.ok) throw new Error("Server API Unreachable");
+                const stations = await response.json();
+
+                stationMarkers.forEach(m => map.removeLayer(m));
+                stationMarkers = [];
+
+                const panelList = document.getElementById('station-list');
+                panelList.innerHTML = ''; 
+
+                const currentPos = driverMarker.getLatLng();
+
+                stations.forEach(st => {
+                    const stPos = L.latLng(st.lat, st.lng);
+                    st.distance = (currentPos.distanceTo(stPos) / 1000); 
+                });
+
+                stations.sort((a, b) => a.distance - b.distance);
+
+                stations.forEach(st => {
+                    const icon = L.divIcon({
+                        className: 'custom-station-marker',
+                        html: `<div style="background-color:#10b981; width:24px; height:24px; border-radius:50%; border:2px solid white; box-shadow: 0 0 12px rgba(16,185,129,0.8); display:flex; align-items:center; justify-content:center;"><i class="fas fa-bolt" style="font-size:12px; color:white;"></i></div>`,
+                        iconSize: [24, 24],
+                        iconAnchor: [12, 12]
+                    });
+                    
+                    const marker = L.marker([st.lat, st.lng], {icon}).addTo(map);
+                    marker.bindPopup(`<div class="font-sans"><b class="text-sm text-slate-800">${st.name}</b><br><span class="text-xs text-slate-500">Power: <span class="font-bold text-emerald-600">${st.power}kW</span> | ${st.type}</span><br><span class="text-xs font-bold text-slate-800">Dist: ${st.distance.toFixed(1)} km</span></div>`);
+                    stationMarkers.push(marker);
+
+                    const div = document.createElement('div');
+                    div.className = "bg-white p-4 rounded-xl border border-slate-200 shadow-sm cursor-pointer hover:border-emerald-500 hover:shadow-md transition-all active:scale-95";
+                    div.innerHTML = `
+                        <div class="flex justify-between items-start mb-1">
+                            <span class="font-bold text-slate-800 text-xs uppercase leading-tight pr-2">${st.name}</span>
+                            <span class="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded text-[10px] font-black whitespace-nowrap">${st.distance.toFixed(1)} KM</span>
+                        </div>
+                        <div class="text-[10px] text-slate-500 font-bold mt-2 flex justify-between border-t border-slate-100 pt-2">
+                            <span><i class="fas fa-plug text-emerald-500 mr-1"></i>${st.type}</span>
+                            <span class="text-amber-500"><i class="fas fa-bolt mr-1"></i>${st.power}kW MAX</span>
+                        </div>
+                    `;
+                    div.onclick = () => {
+                        map.flyTo([st.lat, st.lng], 16, { animate: true, duration: 1 });
+                        setTimeout(() => marker.openPopup(), 1000);
+                    };
+                    panelList.appendChild(div);
+                });
+
+                document.getElementById('stations-panel').classList.remove('translate-x-[150%]');
+            } catch (error) {
+                console.error(error);
+                alert("Failed to access Fleet Charging Database. Ensure Server API is online.");
+            }
+        }
+
+        function closeStationsPanel() {
+            document.getElementById('stations-panel').classList.add('translate-x-[150%]');
+        }
+
+        function connectMQTT() {
+            mqttClient = new Paho.MQTT.Client(MQTT_BROKER, MQTT_PORT, "ev_dash_" + Math.random().toString(16).slice(2, 10));
+            
+            mqttClient.onMessageArrived = (msg) => {
+                const topic = msg.destinationName;
+                const data = JSON.parse(msg.payloadString);
+                
+                if (topic === TOPIC_TELEMETRY && data.id === MY_VEHICLE_ID && data.lat) {
+                    hardwareGPSLock = true; 
+                    const newPos = new L.LatLng(data.lat, data.lng);
+                    driverMarker.setLatLng(newPos); map.panTo(newPos); 
+                    if (data.speed !== undefined) { currentSpeed = data.speed; document.getElementById('ui-speed').innerText = currentSpeed.toFixed(0) + " km/h"; }
+                }
+                else if (topic === TOPIC_ALERTS) {
+                    if (data.clientName === "AUTH SUCCESS") {
+                        document.getElementById('display-name').innerText = data.pickupAddress.replace("Welcome back, ", "").replace("!", "");
+                        if (!isOnline) toggleDriverStatus();
+                    } else if (data.status === "danger" || data.status === "warning") {
+                        showSafetyAlert(data);
+                    } 
+                }
+                else if (topic === TOPIC_DISPATCH && data.targetDriver === MY_VEHICLE_ID) {
+                    if (!isOnline) toggleDriverStatus();
+                    showRideRequest(data); // Call the ride request modal + notification function
+                }
+                else if (topic === TOPIC_CANCEL && data.driverId === MY_VEHICLE_ID && data.jobId === activeJobId) {
+                    dismissModal();
+                    
+                    // Cleanup Route Connection
+                    if(routeLine) map.removeLayer(routeLine);
+                    document.getElementById('active-mission-panel').classList.add('hidden');
+                    activeJobId = null; 
+                    
+                    showSafetyAlert({
+                        clientName: "DISPATCH OVERRIDE",
+                        pickupAddress: "MISSION ABORTED BY COMMAND CENTER. AWAIT NEW ORDERS."
+                    });
+                }
+            };
+
+            mqttClient.connect({ 
+                useSSL: false, 
+                onSuccess: () => {
+                    mqttClient.subscribe(TOPIC_ALERTS); mqttClient.subscribe(TOPIC_TELEMETRY);
+                    mqttClient.subscribe(TOPIC_DISPATCH); mqttClient.subscribe(TOPIC_CANCEL);
+                    document.getElementById('mqtt-status-text').innerText = "Network: Active";
+                    document.getElementById('mqtt-status-dot').className = "absolute bottom-0 right-0 w-4 h-4 rounded-full bg-emerald-500 border-2 border-white";
+                }
+            });
+        }
+
+        function startBatterySimulation() {
+            setInterval(() => {
+                let loadAmps = isOnline ? (currentSpeed * 1.5 + 5) : 1; 
+                const stats = battery.step(loadAmps, 1);
+                updateBatteryUI(stats.soc, stats.voltage);
+                
+                // --- NEW: SEND BATTERY TELEMETRY TO THE SERVER ---
+                if (isOnline && mqttClient && hardwareGPSLock) {
+                    const currentPos = driverMarker.getLatLng();
+                    const payload = {
+                        id: MY_VEHICLE_ID,
+                        lat: currentPos.lat,
+                        lng: currentPos.lng,
+                        speed: currentSpeed,
+                        battery: stats.soc, // Send the calculated physics SoC
+                        status: battery.status === 'CHARGING' ? 'CHARGING' : 'ONLINE'
+                    };
+                    
+                    const msg = new Paho.MQTT.Message(JSON.stringify(payload));
+                    msg.destinationName = TOPIC_TELEMETRY;
+                    mqttClient.send(msg);
+                }
+            }, 1000); // Sends an update to the server every 1 second
+        }
+
+        function updateBatteryUI(soc, voltage) {
+            document.getElementById('ui-soc').innerText = Math.round(soc) + "%";
+            document.getElementById('ui-voltage').innerText = voltage.toFixed(1) + "V";
+            document.getElementById('soc-bar').style.width = soc + "%";
+            const statusLabel = document.getElementById('ui-status');
+            
+            if (battery.status === 'CHARGING') {
+                statusLabel.innerText = "FAST CHARGING (5%/s)";
+                statusLabel.className = "text-blue-500 animate-pulse font-bold";
+            } else if (soc < 20) {
+                statusLabel.innerText = "LOW BATTERY";
+                statusLabel.className = "text-red-500 animate-pulse font-bold";
+            } else {
+                statusLabel.innerText = "SYSTEM OPTIMAL";
+                statusLabel.className = "text-emerald-500 font-bold";
+            }
+        }
+
+        function showSafetyAlert(data) {
+            playAlertSound('danger'); // Play warning siren
+
+            // Trigger OS Notification
+            if ("Notification" in window && Notification.permission === "granted") {
+                new Notification("CRITICAL SYSTEM ALERT", {
+                    body: `${data.clientName}: ${data.pickupAddress}`,
+                    icon: "https://cdn-icons-png.flaticon.com/512/1008/1008930.png"
+                });
+            }
+
+            document.getElementById('modal-title').innerText = "CRITICAL SAFETY ALERT";
+            document.getElementById('req-primary-text').innerText = data.clientName; 
+            document.getElementById('req-secondary-text').innerText = "!!!";
+            document.getElementById('label-1').innerText = "Details";
+            document.getElementById('req-pickup').innerText = data.pickupAddress; 
+            document.getElementById('dest-container').style.display = "none";
+            document.getElementById('countdown').style.display = "none";
+            document.querySelector('.glass-panel').classList.add('alert-danger');
+            document.getElementById('request-modal').classList.remove('translate-y-[150%]');
+        }
+
+        function showRideRequest(data) {
+            activeJobId = data.jobId;
+            
+            // Audio and Browser Notifications
+            playAlertSound('info'); // Play the incoming request chime
+            if ("Notification" in window && Notification.permission === "granted") {
+                new Notification("NEW MISSION RECEIVED", {
+                    body: `Pickup: ${data.pickupAddress}\nDestination: ${data.dropAddress}`,
+                    icon: "https://cdn-icons-png.flaticon.com/512/751/751463.png"
+                });
+            }
+
+            // Route Connection Visualization
+            if(routeLine) map.removeLayer(routeLine);
+            if(data.route) {
+                routeLine = L.polyline(data.route, { className: 'route-path', weight: 6, opacity: 0.8 }).addTo(map);
+                map.fitBounds(routeLine.getBounds(), { padding: [50, 50] });
+            }
+
+            document.getElementById('modal-title').innerText = "NEW RIDE REQUEST";
+            document.getElementById('req-primary-text').innerText = data.customerName || "GUEST";
+            document.getElementById('req-secondary-text').innerText = data.fare;
+            document.getElementById('label-1').innerText = "Pickup";
+            document.getElementById('req-pickup').innerText = data.pickupAddress;
+            document.getElementById('req-destination').innerText = data.dropAddress;
+            document.getElementById('dest-container').style.display = "block";
+            
+            document.getElementById('request-modal').classList.remove('translate-y-[150%]');
+
+            document.getElementById('countdown').style.display = "block";
+            let timeLeft = 60; document.getElementById('countdown').innerText = timeLeft + "s";
+            clearInterval(countdownTimer);
+            countdownTimer = setInterval(() => {
+                timeLeft--; document.getElementById('countdown').innerText = timeLeft + "s";
+                if(timeLeft <= 0) clearInterval(countdownTimer);
+            }, 1000);
+        }
+
+        function dismissModal() {
+            clearInterval(countdownTimer);
+            document.getElementById('request-modal').classList.add('translate-y-[150%]');
+            setTimeout(() => document.querySelector('.glass-panel').classList.remove('alert-danger'), 500);
+        }
+
+        // Mission Acceptance & Completion logic
+        function acknowledgeAction() {
+            if (activeJobId && mqttClient) {
+                // Send ACCEPT reply to the backend Server
+                const payload = { msg_type: 'ACCEPT', driverId: MY_VEHICLE_ID, jobId: activeJobId };
+                const msg = new Paho.MQTT.Message(JSON.stringify(payload));
+                msg.destinationName = TOPIC_RESPONSE;
+                mqttClient.send(msg);
+
+                // Open the Active Mission HUD
+                document.getElementById('active-dest').innerText = document.getElementById('req-destination').innerText;
+                document.getElementById('active-mission-panel').classList.remove('hidden');
+            }
+            dismissModal();
+        }
+
+        function completeMission() {
+            if (activeJobId && mqttClient) {
+                // Send COMPLETE reply to backend Server
+                const payload = { msg_type: 'COMPLETE', driverId: MY_VEHICLE_ID, jobId: activeJobId };
+                const msg = new Paho.MQTT.Message(JSON.stringify(payload));
+                msg.destinationName = TOPIC_RESPONSE;
+                mqttClient.send(msg);
+
+                // Cleanup Route Connection
+                if(routeLine) map.removeLayer(routeLine);
+
+                // Hide the HUD
+                document.getElementById('active-mission-panel').classList.add('hidden');
+                activeJobId = null; 
+            }
+        }
+
+        function toggleDriverStatus() {
+            isOnline = !isOnline;
+            const btn = document.getElementById('toggle-status-btn');
+            btn.innerText = isOnline ? "GO OFFLINE" : "GO ONLINE";
+            
+            if (isOnline) {
+                btn.classList.remove('bg-slate-900');
+                btn.classList.add('bg-red-500');
+            } else {
+                btn.classList.remove('bg-red-500');
+                btn.classList.add('bg-slate-900');
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EV Driver Dashboard - Battery Integrated</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Map & Icons -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        #map { height: 100vh; width: 100%; z-index: 0; }
+        
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.92);
+            backdrop-filter: blur(12px);
+            border-radius: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .battery-gradient {
+            transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        /* Safety Alert Animation */
+        .alert-danger {
+            background: rgba(220, 38, 38, 0.98) !important;
+            color: white !important;
+            border: 4px solid #7f1d1d !important;
+            animation: shake 0.4s infinite;
+        }
+        
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-4px); }
+            75% { transform: translateX(4px); }
+        }
+    </style>
+</head>
+<body class="bg-slate-900 overflow-hidden font-sans">
+
+    <!-- Background Map -->
+    <div id="map"></div>
+
+    <!-- Top Overlay: Driver & Battery Info -->
+    <div class="absolute top-6 left-6 right-6 z-[1000] flex flex-col md:flex-row gap-4 pointer-events-none">
+        
+        <!-- Driver Profile & MQTT Status -->
+        <div class="glass-panel p-5 pointer-events-auto w-full max-w-sm border-l-4 border-emerald-500">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-4">
+                    <div class="relative">
+                        <div class="w-14 h-14 rounded-full bg-slate-200 flex items-center justify-center overflow-hidden border-2 border-white shadow-lg">
+                            <i class="fas fa-user text-slate-400 text-2xl"></i>
+                        </div>
+                        <div id="mqtt-status-dot" class="absolute bottom-0 right-0 w-4 h-4 rounded-full bg-red-500 border-2 border-white"></div>
+                    </div>
+                    <div>
+                        <h2 class="font-bold text-slate-800 text-lg" id="display-name">Nisha Driver</h2>
+                        <span class="text-xs font-medium text-slate-500 uppercase tracking-wider" id="mqtt-status-text">Connecting to Fleet...</span>
+                    </div>
+                </div>
+                <button id="toggle-status-btn" onclick="toggleDriverStatus()" class="bg-slate-900 text-white px-5 py-2.5 rounded-xl text-xs font-black shadow-lg transition hover:bg-slate-800 active:scale-95">
+                    GO ONLINE
+                </button>
+            </div>
+        </div>
+
+        <!-- Battery Telemetry Panel (Matlab Model Implementation) -->
+        <div class="glass-panel p-5 pointer-events-auto w-full max-w-sm border-l-4 border-blue-500">
+            <div class="flex justify-between items-start mb-3">
+                <div>
+                    <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Battery Health</span>
+                    <div class="flex items-baseline space-x-2">
+                        <h3 class="text-3xl font-black text-slate-800" id="ui-soc">--%</h3>
+                        <span class="text-xs font-bold text-blue-600" id="ui-voltage">0.0V</span>
+                    </div>
+                </div>
+                <i class="fas fa-bolt text-blue-500 text-xl mt-1"></i>
+            </div>
+            
+            <!-- Battery Gauge -->
+            <div class="w-full bg-slate-200 h-3 rounded-full overflow-hidden mb-2">
+                <div id="soc-bar" class="battery-gradient h-full bg-gradient-to-r from-blue-600 to-cyan-400" style="width: 0%"></div>
+            </div>
+            <div class="flex justify-between text-[10px] font-bold text-slate-400">
+                <span>0%</span>
+                <span id="ui-status">SYSTEM READY</span>
+                <span>100%</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Alert Modal (Shared for Ride Requests & Safety Alerts) -->
+    <div id="request-modal" class="absolute bottom-0 left-0 right-0 md:bottom-10 md:left-1/2 md:-translate-x-1/2 md:w-[480px] z-[2000] transform translate-y-[150%] transition-transform duration-500 ease-in-out">
+        <div class="glass-panel p-0 overflow-hidden shadow-2xl border border-slate-200">
+            <div id="modal-header" class="bg-slate-900 text-white p-5 flex justify-between items-center">
+                <div class="flex items-center space-x-3">
+                    <div class="animate-pulse w-2.5 h-2.5 bg-emerald-400 rounded-full"></div>
+                    <span id="modal-title" class="font-black text-sm tracking-widest uppercase">INCOMING REQUEST</span>
+                </div>
+                <div class="bg-white/20 px-3 py-1 rounded-full text-xs font-mono" id="countdown">15s</div>
+            </div>
+
+            <div class="p-6">
+                <div class="flex items-start justify-between mb-8">
+                    <div>
+                        <div class="text-[10px] text-slate-400 uppercase font-black mb-1">Details</div>
+                        <h3 class="text-2xl font-black text-slate-800" id="req-primary-text">Sarah Connor</h3>
+                    </div>
+                    <div class="text-right">
+                        <div class="text-[10px] text-slate-400 uppercase font-black mb-1">Impact</div>
+                        <h3 class="text-3xl font-black text-emerald-600" id="req-secondary-text">$24.50</h3>
+                    </div>
+                </div>
+
+                <div class="relative pl-8 space-y-8 border-l-2 border-slate-100 ml-2 mb-8" id="info-stack">
+                    <div class="relative">
+                        <div class="absolute -left-[41px] top-1 w-5 h-5 rounded-full bg-slate-900 border-4 border-white shadow-sm"></div>
+                        <div class="text-[10px] text-slate-400 uppercase font-bold">Pickup</div>
+                        <div class="font-bold text-slate-700" id="req-pickup">Sector 7G, Industrial Area</div>
+                    </div>
+                    <div class="relative" id="dest-container">
+                        <div class="absolute -left-[41px] top-1 w-5 h-5 rounded-full bg-blue-500 border-4 border-white shadow-sm"></div>
+                        <div class="text-[10px] text-slate-400 uppercase font-bold">Destination</div>
+                        <div class="font-bold text-slate-700" id="req-destination">Central Hub Station</div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <button onclick="dismissModal()" class="py-4 rounded-2xl border-2 border-slate-100 text-slate-500 font-black text-sm hover:bg-slate-50 transition">DISMISS</button>
+                    <button onclick="acknowledgeAction()" class="py-4 rounded-2xl bg-slate-900 text-white font-black text-sm hover:bg-slate-800 shadow-xl transition transform active:scale-95">ACKNOWLEDGE</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        /**
+         * PORTED MATLAB BATTERY MODEL
+         * 2nd Order Thevenin Equivalent Circuit
+         */
+        class BatteryModel {
+            constructor(capacity_kwh = 60.0, initial_soc = 85.0, nominal_v = 400.0) {
+                this.capacity_kwh = capacity_kwh;
+                this.capacity_ah = (capacity_kwh * 1000) / nominal_v;
+                this.soc = initial_soc / 100.0; // 0 to 1
+                this.nominal_v = nominal_v;
+                
+                // Thevenin Parameters
+                this.R0 = 0.05; 
+                this.R1 = 0.01; this.C1 = 2000;
+                this.R2 = 0.02; this.C2 = 4000;
+                
+                // States
+                this.v1 = 0.0;
+                this.v2 = 0.0;
+                this.terminal_v = nominal_v;
+            }
+
+            getOCV(soc) {
+                // Li-ion NMC Curve Approximation
+                let cell_v = 3.2 + 0.8 * soc + 0.2 * Math.log(soc + 0.01) - 0.1 * Math.log(1.01 - soc);
+                return cell_v * (this.nominal_v / 3.7);
+            }
+
+            step(current_amps, dt_seconds) {
+                // 1. Coulomb Counting
+                this.soc -= (current_amps * dt_seconds) / (this.capacity_ah * 3600.0);
+                this.soc = Math.max(0.0, Math.min(1.0, this.soc));
+
+                // 2. RC Circuits (Discretized)
+                this.v1 = this.v1 * Math.exp(-dt_seconds / (this.R1 * this.C1)) + 
+                          this.R1 * current_amps * (1 - Math.exp(-dt_seconds / (this.R1 * this.C1)));
+                
+                this.v2 = this.v2 * Math.exp(-dt_seconds / (this.R2 * this.C2)) + 
+                          this.R2 * current_amps * (1 - Math.exp(-dt_seconds / (this.R2 * this.C2)));
+
+                // 3. Terminal Voltage
+                let ocv = this.getOCV(this.soc);
+                this.terminal_v = ocv - (current_amps * this.R0) - this.v1 - this.v2;
+
+                return {
+                    soc: this.soc * 100,
+                    voltage: this.terminal_v
+                };
+            }
+        }
+
+        // Initialize Logic
+        const battery = new BatteryModel();
+        let map, driverMarker, isOnline = false;
+        let currentSpeed = 0; // km/h
+
+        // MQTT Settings
+        const MQTT_BROKER = "broker.emqx.io"; 
+        const MQTT_PORT = 8084; // WebSocket Secure
+        const TOPIC_ALERTS = "taxi/app/driver/requests";
+
+        function initApp() {
+            // Map Setup
+            map = L.map('map', { zoomControl: false, attributionControl: false }).setView([11.0168, 76.9558], 15);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png').addTo(map);
+            driverMarker = L.marker([11.0168, 76.9558]).addTo(map);
+
+            connectMQTT();
+            startBatterySimulation();
+        }
+
+        function connectMQTT() {
+            const client = new Paho.MQTT.Client(MQTT_BROKER, MQTT_PORT, "ev_dash_" + Math.random().toString(16).slice(2, 10));
+            
+            client.onMessageArrived = (msg) => {
+                if (!isOnline) return;
+                const data = JSON.parse(msg.payloadString);
+                
+                // If message contains real battery telemetry from ev_telemetry.py
+                if (data.soc !== undefined) {
+                    updateBatteryUI(data.soc, data.voltage);
+                }
+
+                if (data.fare === "SYSTEM ALERT") {
+                    showSafetyAlert(data);
+                } else {
+                    showRideRequest(data);
+                }
+            };
+
+            client.connect({ 
+                useSSL: true, 
+                onSuccess: () => {
+                    client.subscribe(TOPIC_ALERTS);
+                    document.getElementById('mqtt-status-text').innerText = "Network: Active";
+                    document.getElementById('mqtt-status-dot').className = "absolute bottom-0 right-0 w-4 h-4 rounded-full bg-emerald-500 border-2 border-white";
+                }
+            });
+        }
+
+        function startBatterySimulation() {
+            // This runs the Matlab logic locally at 1Hz
+            setInterval(() => {
+                // If car is "Online", assume some power consumption based on speed
+                // Power (W) = V * I -> I = P/V. 
+                // Basic model: Current = (Speed * 2) Amps while moving + 5A base load
+                let loadAmps = isOnline ? (currentSpeed * 1.5 + 5) : 1; 
+                
+                const stats = battery.step(loadAmps, 1);
+                updateBatteryUI(stats.soc, stats.voltage);
+            }, 1000);
+        }
+
+        function updateBatteryUI(soc, voltage) {
+            document.getElementById('ui-soc').innerText = Math.round(soc) + "%";
+            document.getElementById('ui-voltage').innerText = voltage.toFixed(1) + "V";
+            document.getElementById('soc-bar').style.width = soc + "%";
+            
+            const statusLabel = document.getElementById('ui-status');
+            if (soc < 20) {
+                statusLabel.innerText = "LOW BATTERY";
+                statusLabel.className = "text-red-500 animate-pulse";
+            } else {
+                statusLabel.innerText = "SYSTEM OPTIMAL";
+                statusLabel.className = "text-emerald-500";
+            }
+        }
+
+        function showSafetyAlert(data) {
+            const modal = document.getElementById('request-modal');
+            const panel = modal.querySelector('.glass-panel');
+            const header = document.getElementById('modal-header');
+
+            document.getElementById('modal-title').innerText = "CRITICAL SAFETY ALERT";
+            document.getElementById('req-primary-text').innerText = data.clientName; // e.g. "DRIVER DROWSINESS"
+            document.getElementById('req-secondary-text').innerText = "!!!";
+            document.getElementById('req-pickup').innerText = data.pickupAddress; // e.g. "Immediate Action Required"
+            document.getElementById('dest-container').style.display = "none";
+
+            panel.classList.add('alert-danger');
+            header.classList.replace('bg-slate-900', 'bg-red-800');
+            
+            modal.classList.remove('translate-y-[150%]');
+            if(navigator.vibrate) navigator.vibrate([400, 100, 400]);
+        }
+
+        function showRideRequest(data) {
+            document.getElementById('modal-title').innerText = "NEW RIDE REQUEST";
+            document.getElementById('req-primary-text').innerText = data.clientName;
+            document.getElementById('req-secondary-text').innerText = data.fare;
+            document.getElementById('req-pickup').innerText = data.pickupAddress;
+            document.getElementById('req-destination').innerText = data.dropAddress;
+            document.getElementById('dest-container').style.display = "block";
+            
+            document.getElementById('request-modal').classList.remove('translate-y-[150%]');
+        }
+
+        function toggleDriverStatus() {
+            isOnline = !isOnline;
+            const btn = document.getElementById('toggle-status-btn');
+            btn.innerText = isOnline ? "GO OFFLINE" : "GO ONLINE";
+            btn.classList.toggle('bg-red-500');
+            btn.classList.toggle('bg-slate-900');
+        }
+
+        function dismissModal() {
+            const modal = document.getElementById('request-modal');
+            const panel = modal.querySelector('.glass-panel');
+            const header = document.getElementById('modal-header');
+            
+            modal.classList.add('translate-y-[150%]');
+            setTimeout(() => {
+                panel.classList.remove('alert-danger');
+                header.classList.replace('bg-red-800', 'bg-slate-900');
+            }, 500);
+        }
+
+        function acknowledgeAction() {
+            dismissModal();
+            // In a real app, this would send an MQTT ACK back to the server
+        }
+
+        window.onload = initApp;
+    </script>
+</body>
+</html>
